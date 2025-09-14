@@ -1,0 +1,14 @@
+[package]
+name = "mihon-runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jni = "0.21.1"
+lazy_static = "1.5.0"
+
+# This as well.
+[lib]
+crate-type = ["cdylib"]
+# Put this only if you moved lib.rs.
+path = "src/commonMain/rust/lib.rs"
