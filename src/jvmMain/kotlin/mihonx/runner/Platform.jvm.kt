@@ -14,6 +14,14 @@ actual object RustBridge {
         return rustUseExtensionContext(ctx)
     }
 
+    actual fun installExtension(bytes: ByteArray) {
+        rustInstallExtension(bytes)
+    }
+
+    actual fun getName(ctx: ExtensionContext): String {
+        return rustExtensionGetName(ctx)
+    }
+
     @JvmStatic
     fun logFromRust(message: String) {
         println("Rust logged: $message")
@@ -21,4 +29,6 @@ actual object RustBridge {
 
     external fun nativeInit()
     external fun rustUseExtensionContext(ctx: ExtensionContext): String
+    external fun rustInstallExtension(bytes: ByteArray)
+    external fun rustExtensionGetName(ctx: ExtensionContext): String
 }
