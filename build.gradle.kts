@@ -1,10 +1,30 @@
+import org.gradle.api.tasks.Exec
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidKotlinMultiplatformLibrary)
+}
 
-    // id("dev.gobley.cargo") version "0.3.4"
-    // id("dev.gobley.uniffi") version "0.3.4"
-    // kotlin("plugin.atomicfu") version libs.versions.kotlin
+
+// TODO: Make target dir dynamic based on OS
+val rustTargetDir = "target/x86_64-pc-windows-msvc/release"
+val rustDllName = "mihon_runner.dll"
+val jniLibDir = "/jni_libraries"
+
+tasks.register<Exec>("buildAndCopyRust") {
+    // Step 1: Build Rust
+    workingDir = file("src/commonMain/rust")
+    commandLine("cargo", "build", "--release", "--target", "x86_64-pc-windows-msvc")
+
+    // Step 2: After Rust is built, copy the DLL
+    doLast {
+        val userHomePath = System.getProperty("user.home")
+        val sourceDll = file("$rustTargetDir/$rustDllName")
+        val targetDir = file("$userHomePath$jniLibDir")
+        targetDir.mkdirs()
+        sourceDll.copyTo(file(targetDir.resolve(rustDllName)), overwrite = true)
+        println("Copied Rust library to $jniLibDir")
+    }
 }
 
 kotlin {
@@ -34,21 +54,11 @@ kotlin {
         }
 
         androidMain {
-            dependencies {
-                // Add Android-specific dependencies here. Note that this source set depends on
-                // commonMain by default and will correctly pull the Android artifacts of any KMP
-                // dependencies declared in commonMain.
-            }
+            dependencies { }
         }
 
         iosMain {
-            dependencies {
-                // Add iOS-specific dependencies here. This a source set created by Kotlin Gradle
-                // Plugin (KGP) that each specific iOS target (e.g., iosX64) depends on as
-                // part of KMP’s default source set hierarchy. Note that this source set depends
-                // on common by default and will correctly pull the iOS artifacts of any
-                // KMP dependencies declared in commonMain.
-            }
+            dependencies { }
         }
 
         jvmMain {
@@ -57,5 +67,4 @@ kotlin {
             }
         }
     }
-
 }

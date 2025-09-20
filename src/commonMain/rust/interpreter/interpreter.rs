@@ -1,7 +1,7 @@
 use crate::parser::class::get_name_of_class;
 use crate::parser::parser::Parser;
 use crate::parser::strings::parse_string_at_offset;
-use crate::rust_log;
+use crate::{call_method, has_method, rust_log};
 use crate::types::{DexClass, DexValue, Frame, Instruction, Object, ObjectId};
 use crate::utils::class_file_to_class;
 use std::collections::HashMap;
@@ -21,12 +21,8 @@ pub struct Interpreter {
     pub heap: HashMap<ObjectId, Object>,
     pub object_refs: Vec<GlobalRef>,
     pub frames: Vec<Frame>, // call stack
+    pub main_idx: usize,
     pub next_object_id: ObjectId,
-}
-
-pub fn get_user_agent(_this: &mut Object, _args: Vec<DexValue>) -> DexValue {
-    println!("Called GetUserAgent");
-    DexValue::String("Mihon v1.0.0".into())
 }
 
 impl Interpreter {
@@ -36,38 +32,19 @@ impl Interpreter {
             heap: HashMap::new(),
             object_refs: Vec::new(),
             frames: Vec::new(),
+            main_idx: 0,
             next_object_id: 0,
         }
     }
 
-    /// Push a new stack frame for a method call.
-    /// class_idx = index into parser.classes, method_name = name of method (e.g. "<init>")
     pub fn push_frame(&mut self, class_idx: usize, method_name: String, args: Vec<DexValue>) {
-        // locate method to find how many registers it needs
-        let method_regs = {
-            let class = &self.parser.classes[class_idx];
-            let method = class.methods.get(&method_name).expect("method not found");
-            method.registers as usize
-        };
+        let class = self.parser.classes[class_idx].clone();
 
-        let mut registers = vec![DexValue::Null; method_regs];
-        if args.len() > 0 {
-            for i in 2..method_regs {
-                registers[i] = args[i - 2].clone();
-            }
-        }
-
-        self.frames.push(Frame {
-            registers,
-            temp: None,
-            class_idx,
-            method_name,
-            pc: 0,
-        });
+        self.push_frame_with_class(&class, class_idx, method_name, args);
     }
 
     pub fn push_frame_with_class(&mut self, class: &DexClass, class_idx: usize, method_name: String, args: Vec<DexValue>) {
-        // locate method to find how many registers it needs
+        
         let method_regs = {
             let method = class.methods.get(&method_name).expect("method not found");
             method.registers as usize
@@ -107,6 +84,14 @@ impl Interpreter {
         id
     }
 
+    pub fn alloc_object_and_assign(&mut self, class_name: &str, dst: &u8) {
+        let id = self.alloc_object(class_name);
+
+        if let Some(frame) = self.frames.last_mut(){
+            frame.registers[*dst as usize] = DexValue::Object(id);
+        }
+    }
+
     pub fn insert_object(&mut self, object: Object) -> ObjectId {
         let id = self.next_object_id;
         self.next_object_id += 1;
@@ -125,57 +110,6 @@ impl Interpreter {
         return None
     }
 
-    /// Example: find main class and call its <init>
-    pub fn interpret(&mut self) {
-        // Find index of the main class in parser.classes
-        let main_idx = self
-            .parser
-            .classes
-            .iter()
-            .position(|class| {
-                class
-                    .super_class
-                    .as_ref()
-                    .map(|sc| sc.contains("Source"))
-                    .unwrap_or(false)
-            })
-            .expect("No Main Class found.");
-
-        // Ensure <init> exists
-        if !self.parser.classes[main_idx].methods.contains_key("<init>") {
-            panic!("No <init> method found for main class");
-        }
-
-        // Create ExtensionContext
-        let mut ctx = Object {
-            class_name: "mihonx.ExtensionContextImpl".to_string(),
-            fields: HashMap::new(),
-            methods: HashMap::new(),
-        };
-
-        ctx.methods.insert(
-            "getUserAgent:()Ljava/lang/String;".to_string(),
-            Some(get_user_agent),
-        );
-
-        let extensionContext = self.insert_object(ctx);
-
-        let args: Vec<DexValue> = vec![
-            DexValue::Object(extensionContext)
-        ];
-
-        // pass class index and method name; no borrow to parser remains across the call
-        
-        let class_name = &self.parser.classes[main_idx].name.clone();
-        self.alloc_object(&class_name);
-
-        println!("<init> -> {:?}", self.call_method(main_idx, "<init>", args).unwrap());
-        println!("\n");
-        println!("getName -> {:?}", self.call_method(main_idx, "getName", Vec::new()).unwrap());
-        println!("\n");
-        println!("isCorrectUserAgent -> {:?}", self.call_method(main_idx, "isCorrectUserAgent", Vec::new()).unwrap());
-    }
-
     /// call a method by pointing to its owner class index and name
     pub fn call_method(
         &mut self,
@@ -189,33 +123,9 @@ impl Interpreter {
 
     /// Main execution loop. Returns an optional DexValue if top-level method returned a value.
     pub fn run(&mut self, class_idx: usize) -> Option<DexValue> {
-        let mut return_value: Option<DexValue> = None;
+        let class = self.parser.classes[class_idx].clone();
         
-
-        while let Some(frame) = self.frames.last_mut() {
-            let method = self.parser.classes[class_idx]
-                .methods
-                .get(&frame.method_name);
-            if let Some(method) = method {
-                if frame.pc == 0 {
-                    frame.registers[1] = DexValue::Object(1);
-                }
-                if frame.pc >= method.instructions.len() {
-                    self.pop_frame();
-                    continue;
-                }
-                let instr = &method.instructions[frame.pc].clone();
-                frame.pc += 1;
-                
-                let value = self.execute(instr, class_idx);
-
-                if let Some(value) = value {
-                    return_value = Some(value);
-                    break
-                }
-            }
-        }
-        return_value
+        self.run_with_class(&class, class_idx)
     }
 
     pub fn run_with_class(&mut self, class: &DexClass, class_idx: usize) -> Option<DexValue> {
@@ -226,7 +136,11 @@ impl Interpreter {
                 .get(&frame.method_name);
             if let Some(method) = method {
                 if frame.pc == 0 {
-                    frame.registers[1] = DexValue::Object(1);
+                    if frame.registers.len() < 2 {
+                        frame.registers[0] = DexValue::Object(1);
+                    } else {
+                        frame.registers[1] = DexValue::Object(1);
+                    }
                 }
                 if frame.pc >= method.instructions.len() {
                     self.pop_frame();
@@ -289,6 +203,10 @@ impl Interpreter {
             Instruction::InvokeStatic {
                 args, method_idx, argc
             } => {
+                interpreter_log!(self, "Registers -> {:?}", &frame.registers);
+                if args.len() < 2 {
+                    return None
+                }
                 let first = &frame.registers[args[0] as usize];
                 let second = &frame.registers[args[1] as usize];
 
@@ -357,8 +275,23 @@ impl Interpreter {
                                 interpreter_log!(self, "Object found. -> {}", id);
                                 let ob = self.heap.get(&id).unwrap();
                                 interpreter_log!(self, "Object -> {:?}", &ob);
+
                                 if let Some(method) = ob.methods.get(&format!("{}:{}{}", &method_name, parameters, return_value)) {
                                     interpreter_log!(self, "Method found.");
+
+                                    // check if GlobalRef exists with the needed method
+                                    let signature = format!("{}{}{}", &method_name, &parameters, &return_value);
+                                    for global_ref in self.object_refs.clone() {
+                                        let obj = global_ref.as_obj(); // Get JObject
+                                        
+                                        if has_method(obj, &signature) {
+                                            rust_log("Found it");
+                                            let ret_value = call_method(obj, &method_name, &format!("{}{}", &parameters, &return_value).to_string(), &[]);
+                                            interpreter_log!(self, "ret -> {:?}", &ret_value);
+                                            frame.temp = Some(ret_value);
+                                        }
+                                    }
+
                                     if let Some(method) = method {
                                         let ret_value = method(&mut object, Vec::new());
                                         interpreter_log!(self, "Native Function -> {:?}", &ret_value);
@@ -508,16 +441,22 @@ impl Interpreter {
             }
 
             Instruction::NewInstance { dst, type_idx } => {
-                let string_idx = self.parser.container.clone().unwrap().type_to_string_id(*type_idx as usize).unwrap_or(0);
-                let type_name = self.parser.strings.get(string_idx);
-
-                if let Some(type_name) = type_name {
-                    // TODO: Do proper cast check
+                let string_idx = self.parser
+                    .container
+                    .clone()
+                    .unwrap()
+                    .type_to_string_id(*type_idx as usize)
+                    .unwrap_or(0);
+                
+                if let Some(type_name) = self.parser.strings.get(string_idx) {
+                    let type_name = type_name.clone();
                     interpreter_log!(self, "NewInstance: Type name -> {}", type_name);
+                    self.alloc_object_and_assign(&type_name, dst);
                 }
             }
 
             Instruction::CheckCast { ref_bearing_reg, type_idx } => {
+                interpreter_log!(self, "Starting CheckCast. Registers -> {:?}", &frame.registers);
                 let string_idx = self.parser.container.clone().unwrap().type_to_string_id(*type_idx as usize).unwrap_or(0);
                 let type_name = self.parser.strings.get(string_idx);
 

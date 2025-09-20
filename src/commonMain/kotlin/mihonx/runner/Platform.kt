@@ -9,6 +9,10 @@ interface ExtensionContext {
 expect object RustBridge {
     fun callUserAgent(ctx: ExtensionContext): String
 
+    fun getDexVersion(): String
+
     fun installExtension(bytes: ByteArray)
     fun getName(ctx: ExtensionContext): String
+    fun callMethod(method_name: String): String
+    fun isUserAgentEqual(): Boolean
 }
